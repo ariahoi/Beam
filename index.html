@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beam Solver - Техническая Механика</title>
+    
+    <!-- Стили Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React и ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel для компиляции JSX в браузере -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- FIX: Lucide React UMD ожидает глобальную переменную 'react', а не 'React' -->
+    <script>
+        window.react = window.React;
+    </script>
+
+    <!-- Иконки Lucide React (Версия 0.263.1 стабильна для UMD) -->
+    <script src="https://unpkg.com/lucide-react@0.263.1/dist/umd/lucide-react.min.js"></script>
+
+    <style>
+        /* Скрытие элементов при печати */
+        @media print {
+            .no-print { display: none !important; }
+            .print-only { display: block !important; }
+            body { background: white; }
+            .shadow-sm, .shadow-md, .shadow-lg { box-shadow: none !important; }
+            .border { border-color: #000 !important; }
+        }
+        .print-only { display: none; }
+        
+        /* Кастомный скроллбар */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+        
+        // Безопасное получение объекта иконок
+        const lucide = window.lucideReact || window.lucide;
+        
+        const { 
+            Plus, Trash2, Calculator, Info, RotateCcw, RotateCw, ArrowDown, 
+            MoveVertical, MousePointer2, Settings, BarChart3, Activity, Ruler, 
+            ShieldCheck, AlertTriangle, Square, Circle, BoxSelect, Printer, 
+            Magnet, Hand, XCircle, Edit3, Save, Upload, FileJson, Database, 
+            Layout, Cloud, CloudOff 
+        } = lucide || {};
+
+        // --- КОНСТАНТЫ И БАЗЫ ДАННЫХ ---
+
+        const MATERIALS = [
+            { name: 'Сталь Ст3', E: 200, yield: 240 },
+            { name: 'Сталь 09Г2С', E: 210, yield: 345 },
+            { name: 'Алюминий Д16', E: 72, yield: 280 },
+            { name: 'Древесина (Сосна)', E: 10, yield: 40 }, 
+        ];
+
+        const PROFILES = [
+            { name: 'Двутавр 10', I: 198, W: 39.7 },
+            { name: 'Двутавр 16', I: 873, W: 109 },
+            { name: 'Двутавр 20', I: 1840, W: 184 },
+            { name: 'Швеллер 10', I: 174, W: 34.8 },
+            { name: 'Швеллер 16', I: 747, W: 93.4 },
+            { name: 'Швеллер 20', I: 1520, W: 152 },
+        ];
+
+        const App = () => {
+            // --- Состояние приложения ---
+            const [activeTab, setActiveTab] = useState('loads');
+            const [viewMode, setViewMode] = useState('forces');
+            
+            // Геометрия
+            const [beamType, setBeamType] = useState('simple');
+            const [length, setLength] = useState(10);
+            const [supportA, setSupportA] = useState(0); 
+            const [supportB, setSupportB] = useState(8); 
+            
+            const [loads, setLoads] = useState([
+                { id: '1', type: 'point', value: 20, position: 4 },
+                { id: '2', type: 'distributed', value: 5, position: 5, length: 3 }
+            ]);
+            
+            // Материал
+            const [elasticity, setElasticity] = useState(200); 
+            const [yieldStrength, setYieldStrength] = useState(240); 
+            
+            // Сечение
+            const [sectionType, setSectionType] = useState('rect');
+            const [inertia, setInertia] = useState(8333); 
+            const [sectionModulus, setSectionModulus] = useState(833); 
+            
+            // Параметры для конструктора сечений
+            const [secWidth, setSecWidth] = useState(100);
+            const [secHeight, setSecHeight] = useState(200);
+            const [secDiameter, setSecDiameter] = useState(100);
+            const [selectedProfileIdx, setSelectedProfileIdx] = useState(0);
+
+            // Форма добавления
+            const [newLoadType, setNewLoadType] = useState('point');
+            const [newLoadValue, setNewLoadValue] = useState(10);
+            const [newLoadPos, setNewLoadPos] = useState(5);
+            const [newLoadLength, setNewLoadLength] = useState(2);
+
+            // Интерактивность
+            const [draggingItem, setDraggingItem] = useState(null);
+            const [hoverItem, setHoverItem] = useState(null);
+            const [snappingEnabled, setSnappingEnabled] = useState(true);
+            const [hoverX, setHoverX] = useState(null);
+            
+            // Статус сохранения
+            const [isSaved, setIsSaved] = useState(true);
+            const [isLoaded, setIsLoaded] = useState(false);
+
+            const canvasRef = useRef(null);
+            const containerRef = useRef(null);
+            const fileInputRef = useRef(null);
+
+            // --- LOCAL STORAGE: Загрузка ---
+            useEffect(() => {
+                const savedData = localStorage.getItem('beam_solver_v2');
+                if (savedData) {
+                    try {
+                        const data = JSON.parse(savedData);
+                        if (data.geometry) {
+                            setLength(data.geometry.length);
+                            setBeamType(data.geometry.beamType || 'simple');
+                            setSupportA(data.geometry.supportA);
+                            setSupportB(data.geometry.supportB);
+                        }
+                        if (data.loads) setLoads(data.loads);
+                        if (data.material) {
+                            setElasticity(data.material.elasticity);
+                            setYieldStrength(data.material.yieldStrength);
+                        }
+                        if (data.section) {
+                            setSectionType(data.section.sectionType);
+                            setSecWidth(data.section.secWidth || 100);
+                            setSecHeight(data.section.secHeight || 200);
+                            setSecDiameter(data.section.secDiameter || 100);
+                            setSelectedProfileIdx(data.section.selectedProfileIdx || 0);
+                            if (data.section.sectionType === 'custom') {
+                                setInertia(data.section.inertia);
+                                setSectionModulus(data.section.sectionModulus);
+                            }
+                        }
+                    } catch (e) {
+                        console.error("Ошибка загрузки автосохранения", e);
+                    }
+                }
+                setIsLoaded(true);
+            }, []);
+
+            // --- LOCAL STORAGE: Сохранение ---
+            useEffect(() => {
+                if (!isLoaded) return;
+
+                const dataToSave = {
+                    geometry: { length, beamType, supportA, supportB },
+                    loads,
+                    material: { elasticity, yieldStrength },
+                    section: { sectionType, inertia, sectionModulus, secWidth, secHeight, secDiameter, selectedProfileIdx }
+                };
+                
+                const timeoutId = setTimeout(() => {
+                    localStorage.setItem('beam_solver_v2', JSON.stringify(dataToSave));
+                    setIsSaved(true);
+                }, 500);
+
+                setIsSaved(false);
+                return () => clearTimeout(timeoutId);
+            }, [length, beamType, supportA, supportB, loads, elasticity, yieldStrength, sectionType, inertia, sectionModulus, secWidth, secHeight, secDiameter, selectedProfileIdx, isLoaded]);
+
+
+            // --- Эффекты (Авторасчеты характеристик) ---
+            useEffect(() => {
+                if (sectionType === 'rect') {
+                    const I = (secWidth * Math.pow(secHeight, 3)) / 12 / 10000;
+                    const W = (secWidth * Math.pow(secHeight, 2)) / 6 / 1000;
+                    setInertia(parseFloat(I.toFixed(2)));
+                    setSectionModulus(parseFloat(W.toFixed(2)));
+                } else if (sectionType === 'circle') {
+                    const I = (Math.PI * Math.pow(secDiameter, 4)) / 64 / 10000;
+                    const W = (Math.PI * Math.pow(secDiameter, 3)) / 32 / 1000;
+                    setInertia(parseFloat(I.toFixed(2)));
+                    setSectionModulus(parseFloat(W.toFixed(2)));
+                } else if (sectionType === 'profile') {
+                    const p = PROFILES[selectedProfileIdx];
+                    setInertia(p.I);
+                    setSectionModulus(p.W);
+                }
+            }, [sectionType, secWidth, secHeight, secDiameter, selectedProfileIdx]);
+
+            // --- Логика Расчета ---
+            const calculateReactions = () => {
+                let sumF = 0;
+                let sumM_relativeToA = 0; 
+                const refPoint = beamType === 'cantilever-right' ? length : supportA;
+
+                loads.forEach(load => {
+                    let F = 0;
+                    let M_load = 0; 
+                    if (load.type === 'point') {
+                        F = load.value;
+                        M_load = F * (load.position - refPoint);
+                    } else if (load.type === 'distributed' && load.length) {
+                        F = load.value * load.length;
+                        const center = load.position + load.length / 2;
+                        M_load = F * (center - refPoint);
+                    } else if (load.type === 'moment') {
+                        M_load = load.value; 
+                    }
+                    sumF += F;
+                    sumM_relativeToA += M_load;
+                });
+
+                if (beamType === 'simple') {
+                    const dist = supportB - supportA;
+                    if (Math.abs(dist) < 0.001) return { Ra: 0, Rb: 0, Ma: 0 };
+                    const Rb = sumM_relativeToA / dist; 
+                    const Ra = sumF - Rb;               
+                    return { Ra, Rb, Ma: 0 };
+                } else if (beamType === 'cantilever-left') {
+                    const Ra = sumF; 
+                    const Ma = -sumM_relativeToA; 
+                    return { Ra, Rb: 0, Ma };
+                } else { // cantilever-right
+                    const Ra = sumF; 
+                    const Ma = -sumM_relativeToA; 
+                    return { Ra, Rb: 0, Ma };
+                }
+            };
+
+            const calculateDiagrams = (reac) => {
+                const points = 500; 
+                const step = length / points;
+                const results = [];
+                const EI = elasticity * inertia * 0.01; 
+                const isRigid = EI > 0.0001;
+
+                for (let i = 0; i <= points; i++) {
+                    const x = i * step;
+                    let shear = 0;
+                    let moment = 0;
+
+                    if (beamType === 'simple') {
+                        if (x > supportA) { shear += reac.Ra; moment += reac.Ra * (x - supportA); }
+                        if (x > supportB) { shear += reac.Rb; moment += reac.Rb * (x - supportB); }
+                    } else if (beamType === 'cantilever-left') {
+                        if (x > supportA) {
+                            shear += reac.Ra; 
+                            moment += reac.Ra * (x - supportA); 
+                            moment += reac.Ma; 
+                        }
+                    } 
+
+                    loads.forEach(load => {
+                        if (load.type === 'point') {
+                            if (x > load.position) {
+                                shear -= load.value;
+                                moment -= load.value * (x - load.position);
+                            }
+                        } else if (load.type === 'distributed' && load.length) {
+                            if (x > load.position) {
+                                const activeLen = Math.min(x - load.position, load.length);
+                                const force = load.value * activeLen;
+                                const distToCenter = (x - load.position) - (activeLen / 2);
+                                shear -= force;
+                                moment -= force * distToCenter;
+                            }
+                        } else if (load.type === 'moment') {
+                            if (x > load.position) moment += load.value;
+                        }
+                    });
+                    
+                    if (Math.abs(shear) < 0.001) shear = 0;
+                    if (Math.abs(moment) < 0.001) moment = 0;
+                    results.push({ x, shear, moment, slope: 0, deflection: 0 });
+                }
+
+                if (!isRigid) return results;
+
+                let rawSlope = 0;
+                let rawDeflection = 0;
+                const integrated = [];
+
+                for (let i = 0; i <= points; i++) {
+                    const m = results[i].moment;
+                    if (i > 0) {
+                        const mPrev = results[i-1].moment;
+                        const avgM = (m + mPrev) / 2;
+                        rawSlope += (avgM / EI) * step;
+                        const sPrev = integrated[i-1].s;
+                        const avgS = (rawSlope + sPrev) / 2;
+                        rawDeflection += avgS * step;
+                    }
+                    integrated.push({ s: rawSlope, d: rawDeflection });
+                }
+
+                let C1 = 0;
+                let C2 = 0;
+
+                if (beamType === 'simple') {
+                    const idxA = Math.min(points, Math.max(0, Math.round((supportA / length) * points)));
+                    const idxB = Math.min(points, Math.max(0, Math.round((supportB / length) * points)));
+                    const yA = integrated[idxA].d;
+                    const yB = integrated[idxB].d;
+                    const xA = supportA;
+                    const xB = supportB;
+                    if (Math.abs(xB - xA) > 0.001) {
+                        C1 = - (yB - yA) / (xB - xA);
+                        C2 = - yA - C1 * xA;
+                    }
+                } else if (beamType === 'cantilever-left') {
+                    const idxA = Math.min(points, Math.max(0, Math.round((supportA / length) * points)));
+                    const sA = integrated[idxA].s;
+                    C1 = -sA;
+                    const yA = integrated[idxA].d;
+                    C2 = -yA - C1 * supportA;
+                } else if (beamType === 'cantilever-right') {
+                    const idxEnd = points;
+                    const sEnd = integrated[idxEnd].s;
+                    C1 = -sEnd;
+                    const yEnd = integrated[idxEnd].d;
+                    C2 = -yEnd - C1 * length;
+                }
+
+                for (let i = 0; i <= points; i++) {
+                    results[i].slope = integrated[i].s + C1;
+                    results[i].deflection = (integrated[i].d + C1 * results[i].x + C2) * 1000;
+                }
+
+                return results;
+            };
+
+            const reactions = useMemo(() => calculateReactions(), [loads, supportA, supportB, length, beamType]);
+            const diagramData = useMemo(() => calculateDiagrams(reactions), [reactions, loads, length, elasticity, inertia, beamType]);
+            
+            const stressResults = useMemo(() => {
+                let maxM = 0;
+                diagramData.forEach(d => { if(Math.abs(d.moment) > maxM) maxM = Math.abs(d.moment); });
+                const maxStress = (maxM * 1000) / (sectionModulus || 1); 
+                const safetyFactor = yieldStrength / (maxStress || 0.001);
+                return { maxM, maxStress, safetyFactor, isSafe: maxStress <= yieldStrength };
+            }, [diagramData, sectionModulus, yieldStrength]);
+
+            // --- Управление проектом ---
+            const handleSaveProject = () => {
+                const projectData = {
+                    version: 1,
+                    timestamp: Date.now(),
+                    geometry: { length, beamType, supportA, supportB },
+                    loads,
+                    material: { elasticity, yieldStrength },
+                    section: { sectionType, inertia, sectionModulus, secWidth, secHeight, secDiameter, selectedProfileIdx }
+                };
+                const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `beam_project_${new Date().toISOString().slice(0,10)}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            const handleLoadProject = (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const data = JSON.parse(event.target?.result);
+                        if (data.geometry) {
+                            setLength(data.geometry.length);
+                            setBeamType(data.geometry.beamType || 'simple');
+                            setSupportA(data.geometry.supportA);
+                            setSupportB(data.geometry.supportB);
+                        }
+                        if (data.loads) setLoads(data.loads);
+                        if (data.material) {
+                            setElasticity(data.material.elasticity);
+                            setYieldStrength(data.material.yieldStrength);
+                        }
+                        if (data.section) {
+                            setSectionType(data.section.sectionType);
+                            setInertia(data.section.inertia);
+                            setSectionModulus(data.section.sectionModulus);
+                            setSecWidth(data.section.secWidth || 100);
+                            setSecHeight(data.section.secHeight || 200);
+                            setSecDiameter(data.section.secDiameter || 100);
+                            setSelectedProfileIdx(data.section.selectedProfileIdx || 0);
+                        }
+                    } catch (err) {
+                        alert('Ошибка при чтении файла проекта');
+                    }
+                };
+                reader.readAsText(file);
+                e.target.value = '';
+            };
+
+            const handleReset = () => {
+                if(window.confirm('Это удалит все текущие данные. Продолжить?')) {
+                    setLoads([]); 
+                    setLength(10); 
+                    setSupportA(0); 
+                    setSupportB(10);
+                    setBeamType('simple');
+                    localStorage.removeItem('beam_solver_v2');
+                }
+            };
+
+            // --- Интерактивность ---
+            const snapValue = (val) => {
+                if (!snappingEnabled) return val;
+                const step = 0.5;
+                const threshold = 0.25;
+                const snapped = Math.round(val / step) * step;
+                if (Math.abs(val - snapped) < threshold) return snapped;
+                return val;
+            };
+
+            const getMousePosOnBeam = (e) => {
+                const canvas = canvasRef.current;
+                if (!canvas) return { xMeter: 0 };
+                const rect = canvas.getBoundingClientRect();
+                const xPixel = e.clientX - rect.left;
+                const padding = 60;
+                const width = rect.width; 
+                const scaleX = (width - padding * 2) / length;
+                let xMeter = (xPixel - padding) / scaleX;
+                if (xMeter < 0) xMeter = 0; if (xMeter > length) xMeter = length;
+                return { xMeter, xPixel, padding, scaleX };
+            };
+
+            const getHitItem = (xMeter) => {
+                const hitRadius = length * 0.04; 
+                if (Math.abs(xMeter - supportA) < hitRadius) return { type: 'supportA' };
+                if (beamType === 'simple' && Math.abs(xMeter - supportB) < hitRadius) return { type: 'supportB' };
+
+                for (let i = loads.length - 1; i >= 0; i--) {
+                    const load = loads[i];
+                    if (load.type === 'distributed' && load.length) {
+                        if (xMeter >= load.position - hitRadius && xMeter <= load.position + load.length + hitRadius) {
+                            return { type: 'load', id: load.id };
+                        }
+                    } else {
+                        if (Math.abs(xMeter - load.position) < hitRadius) {
+                            return { type: 'load', id: load.id };
+                        }
+                    }
+                }
+                return null;
+            };
+
+            const handleCanvasMouseDown = (e) => {
+                if (e.button !== 0) return; 
+                const { xMeter } = getMousePosOnBeam(e);
+                const item = getHitItem(xMeter);
+                if (item) setDraggingItem(item);
+                else {
+                    const snapped = snapValue(xMeter);
+                    setNewLoadPos(parseFloat(snapped.toFixed(2)));
+                }
+            };
+
+            const handleCanvasMouseMove = (e) => {
+                const { xMeter } = getMousePosOnBeam(e);
+                setHoverX(xMeter);
+                
+                if (!draggingItem) {
+                    const item = getHitItem(xMeter);
+                    if (item) setHoverItem(item.type.startsWith('support') ? { type: 'support' } : { type: 'load', id: item.id });
+                    else setHoverItem(null);
+                } else {
+                    const snapped = snapValue(xMeter);
+                    const val = parseFloat(snapped.toFixed(2));
+                    if (draggingItem.type === 'supportA') setSupportA(val);
+                    else if (draggingItem.type === 'supportB') setSupportB(val);
+                    else if (draggingItem.type === 'load' && draggingItem.id) {
+                        setLoads(prev => prev.map(l => l.id === draggingItem.id ? { ...l, position: val } : l));
+                    }
+                }
+            };
+
+            const handleCanvasMouseUp = () => setDraggingItem(null);
+            const handleCanvasMouseLeave = () => { setDraggingItem(null); setHoverItem(null); setHoverX(null); };
+
+            const handleCanvasDoubleClick = (e) => {
+                const { xMeter } = getMousePosOnBeam(e);
+                const item = getHitItem(xMeter);
+                if (item && item.type === 'load' && item.id) {
+                    const load = loads.find(l => l.id === item.id);
+                    if (load) {
+                        const newValStr = prompt(`Новое значение для (${load.type}):`, load.value.toString());
+                        if (newValStr !== null) {
+                            const newVal = parseFloat(newValStr);
+                            if (!isNaN(newVal)) setLoads(prev => prev.map(l => l.id === item.id ? { ...l, value: newVal } : l));
+                        }
+                    }
+                }
+            };
+
+            const handleCanvasContextMenu = (e) => {
+                e.preventDefault();
+                const { xMeter } = getMousePosOnBeam(e);
+                const item = getHitItem(xMeter);
+                if (item && item.type === 'load' && item.id) {
+                    if (window.confirm('Удалить эту нагрузку?')) setLoads(prev => prev.filter(l => l.id !== item.id));
+                }
+            };
+
+            const handlePrint = () => window.print();
+
+            // --- Отрисовка Canvas ---
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                const container = containerRef.current;
+                if (!canvas || !container) return;
+
+                const dpr = window.devicePixelRatio || 1;
+                const rect = container.getBoundingClientRect();
+                canvas.width = rect.width * dpr;
+                canvas.height = 600 * dpr;
+                canvas.style.width = `${rect.width}px`;
+                canvas.style.height = `600px`;
+
+                const ctx = canvas.getContext('2d');
+                if (!ctx) return;
+                ctx.scale(dpr, dpr);
+
+                const width = rect.width;
+                const height = 600;
+                const padding = 60;
+                const beamY = 120;
+                const qZeroY = 280;
+                const mZeroY = 480;
+                const scaleX = (width - padding * 2) / length;
+                const toX = (val) => padding + val * scaleX;
+
+                ctx.clearRect(0, 0, width, height);
+                
+                // Сетка
+                ctx.strokeStyle = '#f1f5f9'; ctx.lineWidth = 1; ctx.beginPath();
+                for (let i = 0; i < width; i += 20) { ctx.moveTo(i, 0); ctx.lineTo(i, height); }
+                for (let i = 0; i < height; i += 20) { ctx.moveTo(0, i); ctx.lineTo(width, i); }
+                ctx.stroke();
+
+                const drawArrow = (x, y, len, label, color = '#000', up = false, isGhost = false, isHovered = false) => {
+                    ctx.save(); ctx.beginPath(); 
+                    ctx.strokeStyle = isHovered ? '#2563eb' : color; 
+                    ctx.fillStyle = isHovered ? '#2563eb' : color; 
+                    ctx.lineWidth = isGhost ? 1 : (isHovered ? 3 : 2);
+                    if (isGhost) ctx.setLineDash([4, 2]);
+                    const endY = up ? y - len : y + len;
+                    ctx.moveTo(x, y); ctx.lineTo(x, endY); ctx.stroke();
+                    ctx.setLineDash([]); 
+                    ctx.beginPath();
+                    const headSize = isHovered ? 8 : 6;
+                    if (up) { ctx.moveTo(x, endY); ctx.lineTo(x - headSize, endY + headSize * 1.5); ctx.lineTo(x + headSize, endY + headSize * 1.5); } 
+                    else { ctx.moveTo(x, endY); ctx.lineTo(x - headSize, endY - headSize * 1.5); ctx.lineTo(x + headSize, endY - headSize * 1.5); }
+                    ctx.fill();
+                    if (label && !isGhost) drawLabel(label, x, up ? endY - 8 : endY + 18, isHovered ? '#2563eb' : color);
+                    ctx.restore();
+                };
+
+                const drawMomentArrow = (x, y, val, label, color, isGhost = false, isHovered = false) => {
+                    ctx.save(); 
+                    const activeColor = isHovered ? '#2563eb' : color;
+                    ctx.strokeStyle = activeColor; ctx.fillStyle = activeColor; 
+                    ctx.lineWidth = isGhost ? 1 : (isHovered ? 3 : 2);
+                    if (isGhost) ctx.setLineDash([4, 2]);
+                    const radius = 20; ctx.beginPath();
+                    if (val > 0) ctx.arc(x, y, radius, Math.PI, 2.5 * Math.PI); else ctx.arc(x, y, radius, 2 * Math.PI, 0.5 * Math.PI, true);
+                    ctx.stroke(); ctx.setLineDash([]); ctx.beginPath();
+                    const ay = y + radius;
+                    if (val > 0) { ctx.moveTo(x, ay); ctx.lineTo(x + 5, ay - 5); ctx.lineTo(x + 5, ay + 5); } 
+                    else { ctx.moveTo(x, ay); ctx.lineTo(x - 5, ay - 5); ctx.lineTo(x - 5, ay + 5); }
+                    ctx.fill();
+                    if (label && !isGhost) drawLabel(label, x, y - radius - 15, activeColor);
+                    ctx.restore();
+                };
+
+                const drawLabel = (text, x, y, color) => {
+                    ctx.font = '600 11px Inter, sans-serif'; ctx.textAlign = 'center';
+                    const tm = ctx.measureText(text);
+                    ctx.save(); ctx.globalAlpha = 0.8; ctx.fillStyle = '#fff';
+                    ctx.fillRect(x - tm.width/2 - 2, y - 10, tm.width + 4, 12);
+                    ctx.restore();
+                    ctx.fillStyle = color; ctx.fillText(text, x, y);
+                }
+
+                const drawWall = (x, isRight) => {
+                    const wallH = 60;
+                    const wallW = 10;
+                    const wx = x;
+                    const wy = beamY - wallH / 2;
+                    
+                    ctx.save();
+                    ctx.fillStyle = '#94a3b8';
+                    ctx.fillRect(isRight ? wx : wx - wallW, wy, wallW, wallH);
+                    
+                    ctx.strokeStyle = '#64748b';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    for(let i=0; i < wallH; i+=8) {
+                        if(isRight) {
+                            ctx.moveTo(wx, wy + i);
+                            ctx.lineTo(wx + wallW, wy + i + 5);
+                        } else {
+                            ctx.moveTo(wx, wy + i);
+                            ctx.lineTo(wx - wallW, wy + i + 5);
+                        }
+                    }
+                    ctx.stroke();
+                    ctx.restore();
+                };
+
+                ctx.shadowColor = 'rgba(0, 0, 0, 0.1)'; ctx.shadowBlur = 4; ctx.shadowOffsetY = 2;
+                ctx.beginPath(); ctx.strokeStyle = stressResults.isSafe ? '#334155' : '#ef4444'; 
+                ctx.lineWidth = 6; ctx.lineCap = 'round';
+                ctx.moveTo(toX(0), beamY); ctx.lineTo(toX(length), beamY); ctx.stroke();
+                ctx.shadowColor = 'transparent';
+
+                ctx.beginPath(); ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1;
+                const rulerY = beamY + 50;
+                ctx.moveTo(toX(0), rulerY); ctx.lineTo(toX(length), rulerY);
+                for (let i = 0; i <= length; i+=1) {
+                    const x = toX(i); ctx.moveTo(x, rulerY - 3); ctx.lineTo(x, rulerY + 3);
+                    ctx.fillStyle = '#94a3b8'; ctx.font = '10px Inter, sans-serif'; ctx.textAlign = 'center';
+                    if (i % 2 === 0 || length < 15) ctx.fillText(i.toString(), x, rulerY + 15);
+                } ctx.stroke();
+
+                const drawSupport = (pos, label, reactionVal, type) => {
+                    const isHovered = hoverItem?.type === 'support' || draggingItem?.type === type;
+                    const sx = toX(pos);
+                    ctx.beginPath(); ctx.fillStyle = isHovered ? '#2563eb' : '#3b82f6'; 
+                    ctx.moveTo(sx, beamY + 4); ctx.lineTo(sx - 10, beamY + 18); ctx.lineTo(sx + 10, beamY + 18); ctx.fill();
+                    ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1; ctx.beginPath();
+                    ctx.moveTo(sx - 12, beamY + 18); ctx.lineTo(sx + 12, beamY + 18);
+                    for(let k = -10; k <= 12; k+=4) { ctx.moveTo(sx + k, beamY + 18); ctx.lineTo(sx + k - 3, beamY + 23); } ctx.stroke();
+                    if (Math.abs(reactionVal) > 0.01) {
+                        drawArrow(sx, beamY + 35, 25, `${label}=${reactionVal.toFixed(2)}`, '#059669', true); 
+                    }
+                };
+
+                if (beamType === 'simple') {
+                    drawSupport(supportA, 'Ra', reactions.Ra, 'supportA');
+                    drawSupport(supportB, 'Rb', reactions.Rb, 'supportB');
+                } else if (beamType === 'cantilever-left') {
+                    drawWall(toX(supportA), false);
+                    drawArrow(toX(supportA), beamY + 45, 30, `Ra=${reactions.Ra.toFixed(2)}`, '#059669', true);
+                    drawMomentArrow(toX(supportA), beamY, reactions.Ma, `Ma=${reactions.Ma.toFixed(2)}`, '#059669');
+                } else {
+                    drawWall(toX(length), true);
+                    drawArrow(toX(length), beamY + 45, 30, `Ra=${reactions.Ra.toFixed(2)}`, '#059669', true);
+                    drawMomentArrow(toX(length), beamY, reactions.Ma, `Ma=${reactions.Ma.toFixed(2)}`, '#059669');
+                }
+
+                loads.forEach(load => {
+                    const isHovered = (hoverItem?.type === 'load' && hoverItem.id === load.id) || (draggingItem?.type === 'load' && draggingItem.id === load.id);
+                    const lx = toX(load.position);
+                    if (load.type === 'point') {
+                        drawArrow(lx, beamY - 4, 45, `F=${load.value}`, '#ef4444', false, false, isHovered); 
+                    } else if (load.type === 'distributed' && load.length) {
+                        const endX = toX(load.position + load.length); const color = '#ef4444';
+                        const activeColor = isHovered ? '#2563eb' : color;
+                        ctx.save(); 
+                        ctx.fillStyle = isHovered ? 'rgba(37, 99, 235, 0.1)' : 'rgba(239, 68, 68, 0.08)'; 
+                        ctx.fillRect(lx, beamY - 35, endX - lx, 35);
+                        ctx.strokeStyle = activeColor; ctx.lineWidth = isHovered ? 2 : 1;
+                        const steps = Math.max(2, Math.floor((endX - lx) / 12));
+                        for(let i=0; i<=steps; i++) {
+                            const cx = lx + (endX - lx) * (i/steps);
+                            ctx.beginPath(); ctx.moveTo(cx, beamY - 35); ctx.lineTo(cx, beamY); ctx.stroke();
+                            ctx.beginPath(); ctx.moveTo(cx, beamY); ctx.lineTo(cx-3, beamY-6); ctx.lineTo(cx+3, beamY-6); ctx.fill();
+                        }
+                        ctx.beginPath(); ctx.moveTo(lx, beamY - 35); ctx.lineTo(endX, beamY - 35); ctx.stroke();
+                        drawLabel(`q=${load.value}`, lx + (endX - lx)/2, beamY - 42, activeColor); ctx.restore();
+                    } else if (load.type === 'moment') {
+                        drawMomentArrow(lx, beamY, load.value, `M=${load.value}`, '#d97706', false, isHovered);
+                    }
+                });
+
+                if (!draggingItem && !hoverItem) {
+                    const ghostX = toX(newLoadPos);
+                    if (newLoadType === 'point') drawArrow(ghostX, beamY - 4, 45, '', '#cbd5e1', false, true); 
+                    else if (newLoadType === 'distributed') {
+                        const ghostEnd = toX(newLoadPos + newLoadLength);
+                        ctx.fillStyle = 'rgba(203, 213, 225, 0.3)'; ctx.fillRect(ghostX, beamY - 35, ghostEnd - ghostX, 35);
+                        ctx.strokeStyle = '#cbd5e1'; ctx.setLineDash([4, 2]); ctx.strokeRect(ghostX, beamY - 35, ghostEnd - ghostX, 35); ctx.setLineDash([]);
+                    } else if (newLoadType === 'moment') drawMomentArrow(ghostX, beamY, newLoadValue, '', '#cbd5e1', true);
+                }
+
+                const drawGraph = (dataKey, zeroY, label, colorHex, fillColorHex, unit) => {
+                    let maxVal = 0.0001;
+                    diagramData.forEach(p => { if (Math.abs(p[dataKey]) > maxVal) maxVal = Math.abs(p[dataKey]); });
+                    const graphH = 70;
+                    const scaleY = graphH / maxVal;
+                    ctx.beginPath(); ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+                    ctx.moveTo(toX(0), zeroY); ctx.lineTo(toX(length), zeroY); ctx.stroke(); ctx.setLineDash([]);
+                    ctx.beginPath(); ctx.strokeStyle = colorHex; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+                    ctx.moveTo(toX(0), zeroY);
+                    diagramData.forEach(p => ctx.lineTo(toX(p.x), zeroY - (p[dataKey]) * scaleY));
+                    ctx.lineTo(toX(length), zeroY);
+                    ctx.fillStyle = fillColorHex; ctx.fill(); ctx.stroke(); 
+                    ctx.fillStyle = '#1e293b'; ctx.font = 'bold 13px Inter, sans-serif'; ctx.textAlign = 'left';
+                    ctx.fillText(label, padding/4, zeroY - graphH - 10);
+                    ctx.fillStyle = '#64748b'; ctx.font = '11px Inter, sans-serif';
+                    ctx.fillText(`[${unit}]`, padding/4, zeroY - graphH + 5);
+                    let minV = Infinity, maxV = -Infinity;
+                    diagramData.forEach(p => { const v = p[dataKey]; if (v < minV) minV = v; if (v > maxV) maxV = v; });
+                    ctx.font = '11px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = colorHex;
+                    ctx.fillText(`▲ ${maxV.toFixed(3)}`, width - padding + 40, zeroY - graphH/2);
+                    ctx.fillText(`▼ ${minV.toFixed(3)}`, width - padding + 40, zeroY + graphH/2);
+                };
+
+                if (viewMode === 'forces') {
+                    drawGraph('shear', qZeroY, 'Эпюра Q (Сдвиг)', '#8b5cf6', 'rgba(139, 92, 246, 0.1)', 'кН'); 
+                    drawGraph('moment', mZeroY, 'Эпюра M (Изгиб)', '#f97316', 'rgba(249, 115, 22, 0.1)', 'кН·м'); 
+                } else {
+                    drawGraph('slope', qZeroY, 'Эпюра θ (Угол пов.)', '#06b6d4', 'rgba(6, 182, 212, 0.1)', 'рад'); 
+                    drawGraph('deflection', mZeroY, 'Эпюра y (Прогиб)', '#ec4899', 'rgba(236, 72, 153, 0.1)', 'мм'); 
+                }
+
+                if (hoverX !== null && !draggingItem) {
+                    const screenX = toX(hoverX);
+                    const index = Math.round((hoverX / length) * 500);
+                    const data = diagramData[Math.min(500, Math.max(0, index))];
+                    if (data) {
+                        const boxW = 140; const boxH = 80;
+                        let boxX = screenX + 15; let boxY = 150;
+                        if (boxX + boxW > width) boxX = screenX - boxW - 15;
+                        ctx.shadowColor = 'rgba(0,0,0,0.15)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 4;
+                        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+                        ctx.beginPath(); ctx.roundRect(boxX, boxY, boxW, boxH, 8); ctx.fill();
+                        ctx.shadowColor = 'transparent'; ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1; ctx.stroke();
+                        ctx.textAlign = 'left'; ctx.font = 'bold 12px Inter, sans-serif'; ctx.fillStyle = '#1e293b';
+                        ctx.fillText(`x: ${data.x.toFixed(2)} м`, boxX + 10, boxY + 20);
+                        ctx.font = '12px Inter, sans-serif';
+                        if (viewMode === 'forces') {
+                            ctx.fillStyle = '#7c3aed'; ctx.fillText(`Q: ${data.shear.toFixed(2)} кН`, boxX + 10, boxY + 40);
+                            ctx.fillStyle = '#ea580c'; ctx.fillText(`M: ${data.moment.toFixed(2)} кН·м`, boxX + 10, boxY + 60);
+                        } else {
+                            ctx.fillStyle = '#0891b2'; ctx.fillText(`θ: ${data.slope.toFixed(4)} рад`, boxX + 10, boxY + 40);
+                            ctx.fillStyle = '#db2777'; ctx.fillText(`y: ${data.deflection.toFixed(2)} мм`, boxX + 10, boxY + 60);
+                        }
+                    }
+                }
+
+            }, [length, supportA, supportB, loads, reactions, diagramData, newLoadPos, newLoadType, newLoadLength, newLoadValue, draggingItem, viewMode, stressResults.isSafe, hoverX, hoverItem, beamType]);
+
+            const addLoad = () => setLoads([...loads, { id: Date.now().toString(), type: newLoadType, value: newLoadValue, position: newLoadPos, length: newLoadType === 'distributed' ? newLoadLength : undefined }]);
+            const removeLoad = (id) => setLoads(loads.filter(l => l.id !== id));
+            const getUnitLabel = (type) => { switch(type) { case 'point': return 'кН'; case 'distributed': return 'кН/м'; case 'moment': return 'кН·м'; }};
+
+            return (
+                <div className="min-h-screen bg-slate-50 font-sans text-slate-800 flex flex-col print:bg-white">
+                    <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10 shadow-sm print:hidden">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-blue-600 p-2 rounded-lg text-white"><Calculator size={20} /></div>
+                            <div><h1 className="text-xl font-bold text-slate-900 leading-none">Beam Solver</h1><p className="text-xs text-slate-500 mt-1 font-medium">Техническая механика</p></div>
+                        </div>
+                        <div className="flex gap-2">
+                            <div className={`px-2 flex items-center gap-1 text-xs font-medium border rounded-lg transition-colors ${isSaved ? 'text-green-600 border-green-200 bg-green-50' : 'text-amber-600 border-amber-200 bg-amber-50'}`} title={isSaved ? "Все изменения сохранены в браузере" : "Есть несохраненные изменения..."}>
+                                {isSaved ? <Cloud size={14} /> : <CloudOff size={14} />}
+                                <span className="hidden md:inline">{isSaved ? 'Сохранено' : '...'}</span>
+                            </div>
+                            <div className="w-px bg-slate-200 mx-1"></div>
+                            <button onClick={handleSaveProject} className="text-sm bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 px-3 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium" title="Скачать файл"><Save size={16} /></button>
+                            <label className="text-sm bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 px-3 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium cursor-pointer" title="Загрузить файл">
+                                <Upload size={16} />
+                                <input type="file" ref={fileInputRef} onChange={handleLoadProject} className="hidden" accept=".json" />
+                            </label>
+                            <div className="w-px bg-slate-200 mx-1"></div>
+                            <button onClick={() => setSnappingEnabled(!snappingEnabled)} className={`text-sm px-3 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium border ${snappingEnabled ? 'bg-blue-50 border-blue-200 text-blue-700' : 'bg-white border-slate-200 text-slate-500'}`} title="Прилипание к сетке"><Magnet size={16} className={snappingEnabled ? "" : "opacity-50"} /> {snappingEnabled ? "Snap On" : "Snap Off"}</button>
+                            <button onClick={handlePrint} className="text-sm bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 px-3 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium"><Printer size={16} /> Печать</button>
+                            <button onClick={handleReset} className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium"><RotateCcw size={16} /> Сброс</button>
+                        </div>
+                    </header>
+
+                    <div className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 print:block">
+                        <aside className="lg:col-span-4 space-y-6 flex flex-col print:hidden">
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex-1 flex flex-col">
+                                <div className="flex border-b border-slate-200">
+                                    <button onClick={() => setActiveTab('loads')} className={`flex-1 py-3 text-sm font-medium transition-colors border-b-2 ${activeTab === 'loads' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>Нагрузки</button>
+                                    <button onClick={() => setActiveTab('section')} className={`flex-1 py-3 text-sm font-medium transition-colors border-b-2 ${activeTab === 'section' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>Сечение</button>
+                                    <button onClick={() => setActiveTab('geometry')} className={`flex-1 py-3 text-sm font-medium transition-colors border-b-2 ${activeTab === 'geometry' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>Геометрия</button>
+                                </div>
+
+                                <div className="p-5 flex-1 overflow-y-auto">
+                                    {activeTab === 'loads' ? (
+                                        <div className="space-y-6">
+                                            <div className="bg-slate-100 p-1 rounded-xl flex gap-1">
+                                                <button onClick={() => setNewLoadType('point')} className={`flex-1 py-2 text-xs md:text-sm rounded-lg transition-all shadow-sm flex items-center justify-center gap-1 ${newLoadType === 'point' ? 'bg-white text-slate-800 font-semibold' : 'bg-transparent text-slate-500 hover:text-slate-600 shadow-none'}`}><ArrowDown size={14} /> Сила</button>
+                                                <button onClick={() => setNewLoadType('distributed')} className={`flex-1 py-2 text-xs md:text-sm rounded-lg transition-all shadow-sm flex items-center justify-center gap-1 ${newLoadType === 'distributed' ? 'bg-white text-slate-800 font-semibold' : 'bg-transparent text-slate-500 hover:text-slate-600 shadow-none'}`}><BarChart3 size={14} className="rotate-90"/> Распр.</button>
+                                                <button onClick={() => setNewLoadType('moment')} className={`flex-1 py-2 text-xs md:text-sm rounded-lg transition-all shadow-sm flex items-center justify-center gap-1 ${newLoadType === 'moment' ? 'bg-white text-slate-800 font-semibold' : 'bg-transparent text-slate-500 hover:text-slate-600 shadow-none'}`}><RotateCw size={14} /> Момент</button>
+                                            </div>
+                                            <div className="space-y-4">
+                                                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                                                    <div><label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5 block">Значение ({getUnitLabel(newLoadType)})</label><input type="number" value={newLoadValue} onChange={(e) => setNewLoadValue(Number(e.target.value))} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all font-medium text-slate-700" /></div>
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div><label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">Позиция (м) <MousePointer2 size={10} /></label><input type="number" value={newLoadPos} onChange={(e) => setNewLoadPos(Number(e.target.value))} className="w-full px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all font-medium text-blue-700" step="0.1" /></div>
+                                                        {newLoadType === 'distributed' && (<div><label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5 block">Длина (м)</label><input type="number" value={newLoadLength} onChange={(e) => setNewLoadLength(Number(e.target.value))} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all font-medium text-slate-700" /></div>)}
+                                                    </div>
+                                                </div>
+                                                <button onClick={addLoad} className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white py-2.5 rounded-xl flex items-center justify-center gap-2 transition-colors font-medium shadow-md shadow-blue-200"><Plus size={18} /> Добавить</button>
+                                            </div>
+                                            {loads.length > 0 && (
+                                                <div className="pt-2 space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                                                    {loads.map(load => (
+                                                        <div key={load.id} className="group flex justify-between items-center bg-white p-3 rounded-xl border border-slate-200 hover:border-blue-300 hover:shadow-sm transition-all">
+                                                            <div className="flex items-center gap-3">
+                                                                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${load.type === 'point' ? 'bg-red-50 text-red-600' : load.type === 'moment' ? 'bg-amber-50 text-amber-600' : 'bg-orange-50 text-orange-600'}`}>{load.type === 'point' ? 'F' : load.type === 'moment' ? 'M' : 'q'}</div>
+                                                                <div className="flex flex-col"><span className="text-sm font-bold text-slate-700">{load.value} <span className="text-xs font-normal text-slate-500">{getUnitLabel(load.type)}</span></span><span className="text-xs text-slate-500">x: {load.position}м {load.length ? `(L: ${load.length}м)` : ''}</span></div>
+                                                            </div>
+                                                            <button onClick={() => removeLoad(load.id)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 p-2 rounded-lg transition-colors"><Trash2 size={16} /></button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : activeTab === 'section' ? (
+                                        <div className="space-y-6">
+                                            <div className="space-y-4">
+                                                <label className="text-sm font-medium text-slate-700 block">Тип профиля</label>
+                                                <div className="grid grid-cols-4 gap-2">
+                                                    <button onClick={() => setSectionType('rect')} className={`p-2 rounded-lg border text-center text-xs font-medium flex flex-col items-center gap-2 transition ${sectionType === 'rect' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}><Square size={16} /> Rect</button>
+                                                    <button onClick={() => setSectionType('circle')} className={`p-2 rounded-lg border text-center text-xs font-medium flex flex-col items-center gap-2 transition ${sectionType === 'circle' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}><Circle size={16} /> Circ</button>
+                                                    <button onClick={() => setSectionType('profile')} className={`p-2 rounded-lg border text-center text-xs font-medium flex flex-col items-center gap-2 transition ${sectionType === 'profile' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}><Database size={16} /> Prof</button>
+                                                    <button onClick={() => setSectionType('custom')} className={`p-2 rounded-lg border text-center text-xs font-medium flex flex-col items-center gap-2 transition ${sectionType === 'custom' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}><BoxSelect size={16} /> User</button>
+                                                </div>
+
+                                                {sectionType === 'rect' && (
+                                                    <div className="grid grid-cols-2 gap-3 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                                        <div><label className="text-xs text-slate-500 mb-1 block">Ширина (мм)</label><input type="number" value={secWidth} onChange={(e) => setSecWidth(Number(e.target.value))} className="w-full p-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                                                        <div><label className="text-xs text-slate-500 mb-1 block">Высота (мм)</label><input type="number" value={secHeight} onChange={(e) => setSecHeight(Number(e.target.value))} className="w-full p-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                                                    </div>
+                                                )}
+                                                {sectionType === 'circle' && (
+                                                    <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                                        <div><label className="text-xs text-slate-500 mb-1 block">Диаметр (мм)</label><input type="number" value={secDiameter} onChange={(e) => setSecDiameter(Number(e.target.value))} className="w-full p-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                                                    </div>
+                                                )}
+                                                {sectionType === 'profile' && (
+                                                    <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                                        <label className="text-xs text-slate-500 mb-1 block">Стандартный профиль (ГОСТ)</label>
+                                                        <select 
+                                                            className="w-full p-2 border border-slate-200 rounded-lg outline-none bg-white"
+                                                            value={selectedProfileIdx}
+                                                            onChange={(e) => setSelectedProfileIdx(Number(e.target.value))}
+                                                        >
+                                                            {PROFILES.map((p, i) => <option key={i} value={i}>{p.name}</option>)}
+                                                        </select>
+                                                    </div>
+                                                )}
+
+                                                <div className="p-4 bg-violet-50 rounded-xl border border-violet-100 space-y-3">
+                                                    <div className="flex items-center gap-2 text-violet-800 font-medium"><Ruler size={16} /><span>Характеристики</span></div>
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div><label className="text-xs text-slate-500 mb-1 block">I (см⁴)</label><input type="number" disabled={sectionType !== 'custom'} value={inertia} onChange={(e) => setInertia(Number(e.target.value))} className="w-full p-2 border border-violet-200 rounded-lg outline-none bg-white/50" /></div>
+                                                        <div><label className="text-xs text-slate-500 mb-1 block">W (см³)</label><input type="number" disabled={sectionType !== 'custom'} value={sectionModulus} onChange={(e) => setSectionModulus(Number(e.target.value))} className="w-full p-2 border border-violet-200 rounded-lg outline-none bg-white/50" /></div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="p-4 bg-amber-50 rounded-xl border border-amber-100 space-y-3">
+                                                    <div className="flex items-center justify-between text-amber-800 font-medium mb-2">
+                                                        <div className="flex items-center gap-2"><ShieldCheck size={16} /><span>Материал</span></div>
+                                                        <select className="text-xs p-1 rounded border border-amber-200 bg-white" onChange={(e) => {
+                                                            const mat = MATERIALS.find(m => m.name === e.target.value);
+                                                            if (mat) { setElasticity(mat.E); setYieldStrength(mat.yield); }
+                                                        }}>
+                                                            <option value="">Выбрать...</option>
+                                                            {MATERIALS.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                                                        </select>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div><label className="text-xs text-slate-500 mb-1 block">Модуль E (ГПа)</label><input type="number" value={elasticity} onChange={(e) => setElasticity(Number(e.target.value))} className="w-full p-2 border border-amber-200 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none" /></div>
+                                                        <div><label className="text-xs text-slate-500 mb-1 block">Предел тек. (МПа)</label><input type="number" value={yieldStrength} onChange={(e) => setYieldStrength(Number(e.target.value))} className="w-full p-2 border border-amber-200 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none" /></div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-6">
+                                            <div className="space-y-4">
+                                                <div className="p-4 bg-blue-50 rounded-xl border border-blue-200 space-y-3">
+                                                    <div className="flex items-center gap-2 text-blue-700 font-medium"><Layout size={16} /><span>Тип балки</span></div>
+                                                    <div className="flex flex-col gap-2">
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input type="radio" name="beamType" checked={beamType === 'simple'} onChange={() => setBeamType('simple')} className="accent-blue-600"/>
+                                                            <span className="text-sm">Шарнирная (две опоры)</span>
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input type="radio" name="beamType" checked={beamType === 'cantilever-left'} onChange={() => setBeamType('cantilever-left')} className="accent-blue-600"/>
+                                                            <span className="text-sm">Консоль (заделка слева)</span>
+                                                        </label>
+                                                        <label className="flex items-center gap-2 cursor-pointer">
+                                                            <input type="radio" name="beamType" checked={beamType === 'cantilever-right'} onChange={() => setBeamType('cantilever-right')} className="accent-blue-600"/>
+                                                            <span className="text-sm">Консоль (заделка справа)</span>
+                                                        </label>
+                                                    </div>
+                                                </div>
+
+                                                <div>
+                                                    <label className="text-sm font-medium text-slate-700 mb-1.5 block">Общая длина (L)</label>
+                                                    <div className="flex items-center gap-2">
+                                                        <input type="range" min="1" max="20" step="1" value={length} onChange={(e) => setLength(Number(e.target.value))} className="flex-1 accent-blue-600 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer" />
+                                                        <input type="number" value={length} onChange={(e) => setLength(Number(e.target.value))} className="w-16 p-2 border border-slate-200 rounded-lg text-center font-medium text-sm" />
+                                                    </div>
+                                                </div>
+
+                                                <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-4">
+                                                    <div className="flex items-center gap-2 text-slate-700 font-medium"><MoveVertical size={16} className="text-blue-500" /><span>Положение опор</span></div>
+                                                    
+                                                    {beamType === 'simple' ? (
+                                                        <div className="grid grid-cols-2 gap-4">
+                                                            <div><label className="text-xs text-slate-500 mb-1 block">Опора A (м)</label><input type="number" value={supportA} onChange={(e) => setSupportA(Number(e.target.value))} className="w-full p-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                                                            <div><label className="text-xs text-slate-500 mb-1 block">Опора B (м)</label><input type="number" value={supportB} onChange={(e) => setSupportB(Number(e.target.value))} className="w-full p-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                                                        </div>
+                                                    ) : beamType === 'cantilever-left' ? (
+                                                        <div><label className="text-xs text-slate-500 mb-1 block">Заделка (м)</label><input type="number" value={supportA} onChange={(e) => setSupportA(Number(e.target.value))} className="w-full p-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                                                    ) : (
+                                                        <div className="text-sm text-slate-500 italic">Заделка жестко фиксирована справа (L={length}м)</div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                            
+                            <div className="space-y-4">
+                                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+                                    <div className="flex items-center gap-2 mb-4 text-emerald-700"><BarChart3 size={20} /><h2 className="font-bold">Реакции опор</h2></div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="bg-emerald-50/50 border border-emerald-100 p-3 rounded-xl"><div className="text-xs text-emerald-600 font-medium uppercase tracking-wider mb-1">Ra</div><div className="text-2xl font-bold text-emerald-800">{reactions.Ra.toFixed(2)} <span className="text-sm font-normal text-emerald-600">кН</span></div></div>
+                                        {beamType === 'simple' ? (
+                                            <div className="bg-emerald-50/50 border border-emerald-100 p-3 rounded-xl"><div className="text-xs text-emerald-600 font-medium uppercase tracking-wider mb-1">Rb</div><div className="text-2xl font-bold text-emerald-800">{reactions.Rb.toFixed(2)} <span className="text-sm font-normal text-emerald-600">кН</span></div></div>
+                                        ) : (
+                                            <div className="bg-emerald-50/50 border border-emerald-100 p-3 rounded-xl"><div className="text-xs text-emerald-600 font-medium uppercase tracking-wider mb-1">Ma</div><div className="text-2xl font-bold text-emerald-800">{reactions.Ma.toFixed(2)} <span className="text-sm font-normal text-emerald-600">кН·м</span></div></div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className={`bg-white p-5 rounded-2xl shadow-sm border ${stressResults.isSafe ? 'border-emerald-200' : 'border-red-200'}`}>
+                                    <div className={`flex items-center gap-2 mb-4 ${stressResults.isSafe ? 'text-emerald-700' : 'text-red-700'}`}>
+                                        {stressResults.isSafe ? <ShieldCheck size={20} /> : <AlertTriangle size={20} />}
+                                        <h2 className="font-bold">Проверка прочности</h2>
+                                    </div>
+                                    <div className="space-y-3">
+                                        <div className="flex justify-between items-center text-sm">
+                                            <span className="text-slate-500">Макс. момент (M)</span>
+                                            <span className="font-medium">{stressResults.maxM.toFixed(2)} кН·м</span>
+                                        </div>
+                                        <div className="flex justify-between items-center text-sm">
+                                            <span className="text-slate-500">Напряжение (σ)</span>
+                                            <span className={`font-bold ${stressResults.isSafe ? 'text-emerald-600' : 'text-red-600'}`}>{stressResults.maxStress.toFixed(1)} МПа</span>
+                                        </div>
+                                        <div className="flex justify-between items-center text-sm">
+                                            <span className="text-slate-500">Допускаемое</span>
+                                            <span className="font-medium text-slate-700">{yieldStrength} МПа</span>
+                                        </div>
+                                        
+                                        <div className="w-full bg-slate-100 rounded-full h-2 mt-2 overflow-hidden">
+                                            <div 
+                                                className={`h-full rounded-full transition-all duration-500 ${stressResults.isSafe ? 'bg-emerald-500' : 'bg-red-500'}`} 
+                                                style={{ width: `${Math.min((stressResults.maxStress / yieldStrength) * 100, 100)}%` }}
+                                            ></div>
+                                        </div>
+                                        <div className={`text-xs text-center font-medium py-1 px-2 rounded mt-2 ${stressResults.isSafe ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                                            {stressResults.isSafe ? `Запас прочности: ${stressResults.safetyFactor.toFixed(2)}` : 'ВНИМАНИЕ: ПЕРЕГРУЗКА!'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </aside>
+
+                        <main className="lg:col-span-8 space-y-4 print:col-span-12">
+                            <div className="flex justify-between items-center print:hidden">
+                                <div className="text-sm text-slate-500 flex items-center gap-2">
+                                    <span className={`flex items-center gap-1 ${hoverItem ? 'text-blue-600 font-semibold' : ''}`}>
+                                        {hoverItem ? <Hand size={14}/> : <MousePointer2 size={14}/>}
+                                        {hoverItem?.type === 'load' ? '2x Клик: ред.' : hoverItem?.type === 'support' ? 'Тяните опору' : 'Клик: добавить'}
+                                    </span>
+                                </div>
+                                <div className="flex gap-2">
+                                    <button onClick={() => setViewMode('forces')} className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${viewMode === 'forces' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-600 hover:bg-slate-50'}`}><BarChart3 size={16} /> Силы</button>
+                                    <button onClick={() => setViewMode('deflections')} className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${viewMode === 'deflections' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-600 hover:bg-slate-50'}`}><Activity size={16} /> Деформации</button>
+                                </div>
+                            </div>
+
+                            <div className="hidden print:block mb-4">
+                                <h1 className="text-2xl font-bold">Отчет расчета балки</h1>
+                                <p className="text-slate-500">Сформировано автоматически</p>
+                            </div>
+
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden relative group select-none">
+                                <div className="w-full overflow-x-auto overflow-y-hidden" ref={containerRef}>
+                                    <canvas 
+                                        ref={canvasRef} 
+                                        onMouseDown={handleCanvasMouseDown} 
+                                        onMouseMove={handleCanvasMouseMove} 
+                                        onMouseUp={handleCanvasMouseUp} 
+                                        onMouseLeave={handleCanvasMouseLeave} 
+                                        onDoubleClick={handleCanvasDoubleClick}
+                                        onContextMenu={handleCanvasContextMenu}
+                                        className={`bg-white mx-auto touch-none ${draggingItem ? 'cursor-grabbing' : hoverItem ? 'cursor-grab' : 'cursor-crosshair'}`} 
+                                        style={{ touchAction: 'none' }} 
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="hidden print:grid grid-cols-2 gap-4 mt-6">
+                                <div className="border p-4 rounded">
+                                    <h3 className="font-bold mb-2">Исходные данные</h3>
+                                    <p>Длина: {length} м, Тип: {beamType}</p>
+                                    <p>Сечение: I={inertia} см⁴, W={sectionModulus} см³</p>
+                                </div>
+                                <div className="border p-4 rounded">
+                                    <h3 className="font-bold mb-2">Результаты</h3>
+                                    <p>Реакция Ra: {reactions.Ra.toFixed(2)} кН</p>
+                                    <p>Макс. напряжение: {stressResults.maxStress.toFixed(1)} МПа</p>
+                                    <p>Запас прочности: {stressResults.safetyFactor.toFixed(2)}</p>
+                                </div>
+                            </div>
+
+                            {viewMode === 'forces' ? (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-violet-600 font-bold text-lg">Q</div>
+                                        <div><div className="font-semibold text-slate-800">Поперечная сила</div><div className="text-xs text-slate-500">Сдвиг сечения</div></div>
+                                    </div>
+                                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center text-orange-600 font-bold text-lg">M</div>
+                                        <div><div className="font-semibold text-slate-800">Изгибающий момент</div><div className="text-xs text-slate-500">Растяжение волокон</div></div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-full bg-cyan-100 flex items-center justify-center text-cyan-600 font-bold text-lg">θ</div>
+                                        <div><div className="font-semibold text-slate-800">Угол поворота</div><div className="text-xs text-slate-500">Наклон сечения (радианы)</div></div>
+                                    </div>
+                                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-full bg-pink-100 flex items-center justify-center text-pink-600 font-bold text-lg">y</div>
+                                        <div><div className="font-semibold text-slate-800">Прогиб балки</div><div className="text-xs text-slate-500">Вертикальное смещение (мм)</div></div>
+                                    </div>
+                                </div>
+                            )}
+                        </main>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
